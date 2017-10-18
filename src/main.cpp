@@ -2,8 +2,10 @@
 #include <iostream>
 #include <cstring>
 #include <cstdio>
+#include <ctime>
 
-const int N = 1000000;
+const int N = 1000000000;
+const int K = 10000;
 
 int Consistent(char* c, int n) {
 	int res = 0;
@@ -15,41 +17,57 @@ int Consistent(char* c, int n) {
 	return res+1;
 }
 
-void Parallel(char* c, int n) {
+void Parallel(char* c, int n, int size, int rank) {
 
-	int size, total = 0;
-	int argc; char** argv;
+	double t1;
+	if (rank == 0) t1 = MPI_Wtime();
 
-	MPI_Init(&argc, &argv);
+	int total = 0;
 
-	int res = 0, rank, count = 0;
-
-	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-	MPI_Comm_size(MPI_COMM_WORLD, &size);
+	int res = 0, count = 0;
 
 	//printf("size=%d\n", size);
-	if (size!=1) count = n / (size - 1);//... ... ... .  n=10, size=4, count=3 =10/(4-1)
-	else count = n;
-	//printf("count=%d\n", count);
+	if (rank == 0) {
+		if (size != 1) count = n / (size - 1);//... ... ... .  n=10, size=4, count=3 =10/(4-1)
+		else count = n - 1;
+	}
+	//printf("rank=%d count=%d\n", rank, count);
 
 	if (rank == 0) {
 
 		for (int i = 1; i < size - 1; i++) {
-			MPI_Send(c + i*count - 1, count + 1, MPI_CHAR, i, 0, MPI_COMM_WORLD);
+			MPI_Send(&count, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+			MPI_Send(c + i*count - 1, count + 1, MPI_CHAR, i, 1, MPI_COMM_WORLD);
 			//printf("send %d\n", i);
 		}
-		if (size!=1) MPI_Send(c + (size - 1)*count - 1, n - (size - 1)*count + 1, MPI_CHAR, size - 1, 0, MPI_COMM_WORLD);
-		//printf("send %d\n", size - 1);
+		if (size != 1) {
+			MPI_Send(&count, 1, MPI_INT, size-1, 0, MPI_COMM_WORLD);
+			MPI_Send(&n, 1, MPI_INT, size - 1, 0, MPI_COMM_WORLD);
+			MPI_Send(c + (size - 1)*count - 1, n - (size - 1)*count + 1, MPI_CHAR, size - 1, 1, MPI_COMM_WORLD);
+			//printf("send %d\n", size - 1);
+		}
 	}
 
-	int bufsize = count + 1;
-	if (rank == size - 1) bufsize = n - (size - 1)*count + 1;
+	int bufsize = count+1;
+	if (size!=1 && rank == size - 1) {
+		MPI_Status status;
+		MPI_Recv(&count, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
+		MPI_Recv(&n, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
+		bufsize = n - (size - 1)*count + 1;
+		//printf("rank=%d bufsize=%d\n", rank, bufsize);
+	}
+	else if (rank!=0){
+		MPI_Status status;
+		MPI_Recv(&bufsize, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
+		bufsize++;
+		//printf("rank=%d bufsize=%d\n", rank, bufsize);
+	}
 
 	char* buf = new char[bufsize];
 
 	if (rank != 0) {
 		MPI_Status status;
-		MPI_Recv(buf, bufsize, MPI_CHAR, 0, 0, MPI_COMM_WORLD, &status);
+		MPI_Recv(buf, bufsize, MPI_CHAR, 0, 1, MPI_COMM_WORLD, &status);
 		//printf("recv %d\n####################  \"", rank);
 		//for (int i = 0; i < bufsize; i++)
 		//	std::cout << buf[i];
@@ -67,21 +85,55 @@ void Parallel(char* c, int n) {
 	MPI_Reduce(&res, &total, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 	//printf("reduced %d\n", rank);
 
-
-	if (rank == 0) std::cout /*<< "%%%%%%%%%%%%%%%%%%% parallel " */<< total << std::endl;;
-
-	MPI_Finalize();
-
+	if (rank == 0) {
+		std::cout << "Parallel version" << std::endl;
+		std::cout <<  total << std::endl;
+		double t2 = MPI_Wtime();
+		std::cout << "parallel time " << t2 - t1 << std::endl;
+	}
 }
 
 
 
 int main(int argc, char**argv) {
 
-	char *c = argv[argc - 1];
+	MPI_Init(&argc, &argv);
 
-	//std::cout<<Consistent(c, strlen(c))<<std::endl;
-	Parallel(c, strlen(c));
+	int size, rank, n=0;
+	char* c=0;
+
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+	if (rank == 0) {
+		std::cout << argc << ' ' << argv << std::endl;
+		if (argc > 1) {
+			c = argv[argc - 1];
+			n = strlen(c);
+		}
+		else if (argc==1){
+			c = new char[N];
+			srand(time(0));
+			for (int i = 0; i < N; i++)
+				c[i] = 'a';
+			for (int i = 0; i < K; i++) 
+				c[rand() % N] = ' ';
+			n = N;
+		}
+		std::cout << "Consistent version" << std::endl;
+		double t1 = MPI_Wtime();
+		std::cout<<Consistent(c, n)<<std::endl;
+		double t2 = MPI_Wtime();
+		std::cout << "consistent time=" <<t2-t1<< std::endl << std::endl;
+	}
+
+
+	Parallel(c, n, size, rank);
+
+
+	if (rank==0 && argc == 1) delete[] c;
+
+	MPI_Finalize();
 
 	return 0;
 }
